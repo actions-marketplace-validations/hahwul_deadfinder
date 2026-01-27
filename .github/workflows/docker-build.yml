@@ -16,7 +16,7 @@ jobs:
         arch: [linux/amd64, linux/arm64]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
       - name: Install cosign
         if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@v4.0.0
