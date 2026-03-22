@@ -19,7 +19,7 @@ group :development, :test do
   gem 'rubocop'
   gem 'rubocop-rspec'
   gem 'rubocop-rake'
-  gem 'webmock', '~> 3.14'
+  gem 'webmock', '~> 3.26'
   gem 'rake'
   gem 'simplecov'
   gem 'simplecov-cobertura'
