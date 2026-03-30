@@ -2,7 +2,7 @@
 
 require 'spec_helper'
 require 'webmock/rspec'
-require 'deadfinder/runner'
+require 'deadfinder'
 
 RSpec.describe DeadFinder::Runner do
   let(:runner) { described_class.new }
@@ -10,6 +10,9 @@ RSpec.describe DeadFinder::Runner do
 
   before do
     options['silent'] = true
+    DeadFinder.output.clear
+    DeadFinder::CACHE_SET.clear
+    DeadFinder::CACHE_QUE.clear
   end
 
   describe '#run' do
@@ -60,6 +63,8 @@ RSpec.describe DeadFinder::Runner do
       it 'logs an error for invalid match pattern' do
         runner.run(target, options)
         expect(DeadFinder::Logger).to have_received(:error).with(/Invalid match pattern/)
+        expect(DeadFinder.output[target]).to include('http://example.com/broken')
+        expect(a_request(:get, 'http://example.com/valid')).to have_been_made
       end
     end
 
@@ -71,7 +76,9 @@ RSpec.describe DeadFinder::Runner do
 
       it 'logs an error for invalid ignore pattern' do
         runner.run(target, options)
-        expect(DeadFinder::Logger).to have_received(:error).with(/Invalid match pattern/)
+        expect(DeadFinder::Logger).to have_received(:error).with(/Invalid ignore pattern/)
+        expect(DeadFinder.output[target]).to include('http://example.com/broken')
+        expect(a_request(:get, 'http://example.com/valid')).to have_been_made
       end
     end
   end
@@ -92,15 +99,102 @@ RSpec.describe DeadFinder::Runner do
       runner.worker(1, jobs, results, target, options)
       expect(DeadFinder.output[target]).to include(url)
     end
+
+    context 'when a network error occurs' do
+      let(:error_url) { 'http://example.com/error' }
+      let(:url) { error_url }
+
+      before do
+        stub_request(:get, error_url).to_raise(StandardError)
+        # Clear cache to ensure worker processes the URL
+        DeadFinder::CACHE_SET.delete(error_url)
+        DeadFinder::CACHE_QUE.delete(error_url)
+      end
+
+      it 'handles the error gracefully' do
+        expect { runner.worker(1, jobs, results, target, options) }.not_to raise_error
+      end
+
+      it 'tracks the error in coverage data when coverage is enabled' do
+        options['coverage'] = true
+        DeadFinder.coverage_data[target] = nil
+        runner.worker(1, jobs, results, target, options)
+        expect(DeadFinder.coverage_data[target][:dead]).to eq(1)
+        expect(DeadFinder.coverage_data[target][:status_counts]['error']).to eq(1)
+      end
+    end
   end
 
   describe '#extract_links' do
-    let(:html) { '<html><body><a href="http://example.com">Link</a></body></html>' }
-    let(:page) { Nokogiri::HTML(html) }
+    context 'with valid attributes' do
+      let(:html) do
+        <<~HTML
+          <html>
+            <body>
+              <a href="http://example.com/anchor">Anchor</a>
+              <script src="http://example.com/script.js"></script>
+              <link href="http://example.com/style.css" rel="stylesheet">
+              <iframe src="http://example.com/frame"></iframe>
+              <form action="http://example.com/form"></form>
+              <object data="http://example.com/object"></object>
+              <embed src="http://example.com/embed">
+            </body>
+          </html>
+        HTML
+      end
+      let(:page) { Nokogiri::HTML(html) }
 
-    it 'extracts links from the page' do
-      links = runner.send(:extract_links, page)
-      expect(links[:anchor]).to include('http://example.com')
+      it 'extracts valid links' do
+        links = runner.send(:extract_links, page)
+
+        expected_links = {
+          anchor: ['http://example.com/anchor'],
+          script: ['http://example.com/script.js'],
+          link: ['http://example.com/style.css'],
+          iframe: ['http://example.com/frame'],
+          form: ['http://example.com/form'],
+          object: ['http://example.com/object'],
+          embed: ['http://example.com/embed']
+        }
+
+        expect(links).to eq(expected_links)
+      end
+    end
+
+    context 'with missing attributes' do
+      let(:html) do
+        <<~HTML
+          <html>
+            <body>
+              <!-- Missing attributes -->
+              <a>Anchor No Href</a>
+              <script>Script No Src</script>
+              <link>Link No Href</link>
+              <iframe>Frame No Src</iframe>
+              <form>Form No Action</form>
+              <object>Object No Data</object>
+              <embed>Embed No Src</embed>
+            </body>
+          </html>
+        HTML
+      end
+      let(:page) { Nokogiri::HTML(html) }
+
+      it 'returns empty arrays for elements with missing attributes' do
+        links = runner.send(:extract_links, page)
+
+        expected_links = {
+          anchor: [],
+          script: [],
+          link: [],
+          iframe: [],
+          form: [],
+          object: [],
+          embed: []
+        }
+
+        expect(links).to eq(expected_links)
+      end
     end
   end
 end

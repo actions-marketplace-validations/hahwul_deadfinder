@@ -15,6 +15,25 @@ RSpec.describe DeadFinder::UrlPatternMatcher do
     it 'raises an error when the pattern is an invalid regex' do
       expect { described_class.match?('http://example.com', '[') }.to raise_error(RegexpError)
     end
+
+    it 'returns false when Timeout::Error is raised' do
+      allow(Timeout).to receive(:timeout).and_raise(Timeout::Error)
+      expect(described_class.match?('http://example.com', 'example')).to be false
+    end
+
+    it 'returns false when the operation times out' do
+      stub_const('DeadFinder::UrlPatternMatcher::TIMEOUT_DURATION', 0.1)
+      allow(Regexp).to receive(:new).and_wrap_original do |original_method, *args|
+        regexp = original_method.call(*args)
+        allow(regexp).to receive(:match?) do
+          sleep 0.2
+          true
+        end
+        regexp
+      end
+
+      expect(described_class.match?('http://example.com', 'example')).to be false
+    end
   end
 
   describe '.ignore?' do
@@ -28,6 +47,25 @@ RSpec.describe DeadFinder::UrlPatternMatcher do
 
     it 'raises an error when the pattern is an invalid regex' do
       expect { described_class.ignore?('http://example.com', '[') }.to raise_error(RegexpError)
+    end
+
+    it 'returns false when Timeout::Error is raised' do
+      allow(Timeout).to receive(:timeout).and_raise(Timeout::Error)
+      expect(described_class.ignore?('http://example.com', 'example')).to be false
+    end
+
+    it 'returns false when the operation times out' do
+      stub_const('DeadFinder::UrlPatternMatcher::TIMEOUT_DURATION', 0.1)
+      allow(Regexp).to receive(:new).and_wrap_original do |original_method, *args|
+        regexp = original_method.call(*args)
+        allow(regexp).to receive(:match?) do
+          sleep 0.2
+          true
+        end
+        regexp
+      end
+
+      expect(described_class.ignore?('http://example.com', 'example')).to be false
     end
   end
 end
