@@ -1,105 +1,99 @@
 {
-  description = "DeadFinder - Find dead-links (broken links) in web pages";
+  description = "DeadFinder — find dead (broken) links in web pages, URL lists, and sitemaps";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-        ruby = pkgs.ruby_4_0;
+        pkgs = import nixpkgs { inherit system; };
 
-        # Bundle all gem dependencies
-        gems = pkgs.bundlerEnv {
-          name = "deadfinder-gems";
-          inherit ruby;
-          gemdir = self;
-          groups = [ "default" ];
+        # lexbor.cr's postinstall hook clones the upstream lexbor C library
+        # from GitHub at a pinned commit (lib/lexbor/src/ext/revision) and
+        # builds it via cmake. The Nix sandbox blocks network access, so
+        # pre-fetch the source as a fixed-output derivation and drop it
+        # into place during preBuild — then cmake runs normally.
+        lexborCSrc = pkgs.fetchgit {
+          url = "https://github.com/lexbor/lexbor.git";
+          rev = "971faf11a5f45433b9193a143e2897d8c0fd5611";
+          sha256 = "0v3ka5dhgz2jkmigdjcjm3vmxlc9yv4hks6pz13xzgagxxfwlw7s";
         };
 
-        # Main deadfinder package
-        deadfinder = pkgs.stdenv.mkDerivation {
+        deadfinder = pkgs.crystal.buildCrystalPackage rec {
           pname = "deadfinder";
-          version = "1.10.0";
-          src = self;
+          version = "2.0.0";
 
-          buildInputs = [ gems gems.wrappedRuby ];
-          nativeBuildInputs = [ pkgs.makeWrapper ];
+          src = ./.;
 
-          dontBuild = true;
+          # Generate with: crystal2nix > shards.nix
+          shardsFile = ./shards.nix;
+
+          nativeBuildInputs = with pkgs; [ crystal shards cmake pkg-config ];
+          buildInputs = [ ];
+
+          # lexbor.cr's postinstall hook (build_ext.cr) clones the lexbor C
+          # library at a pinned commit and builds it via cmake. The Nix
+          # sandbox blocks network, so we (a) replace the read-only shard
+          # symlink with a writable copy, (b) drop in the pre-fetched C
+          # source, and (c) run cmake directly here — bypassing build_ext.cr.
+          preBuild = ''
+            cp -RL lib/lexbor lib/lexbor.rw
+            chmod -R u+w lib/lexbor.rw
+            rm lib/lexbor
+            mv lib/lexbor.rw lib/lexbor
+
+            cp -r ${lexborCSrc} lib/lexbor/src/ext/lexbor-c
+            chmod -R u+w lib/lexbor/src/ext/lexbor-c
+
+            mkdir -p lib/lexbor/src/ext/lexbor-c/build
+            ( cd lib/lexbor/src/ext/lexbor-c/build \
+              && cmake .. \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DLEXBOR_BUILD_TESTS_CPP=OFF \
+                  -DLEXBOR_INSTALL_HEADERS=OFF \
+                  -DLEXBOR_BUILD_SHARED=ON \
+                  -G "Unix Makefiles" \
+              && cmake --build . --config Release -j $NIX_BUILD_CORES )
+          '';
+
+          buildPhase = ''
+            runHook preBuild
+            shards build --release --no-debug
+            runHook postBuild
+          '';
 
           installPhase = ''
             runHook preInstall
-
-            mkdir -p $out/bin $out/lib
-            cp -r lib/* $out/lib/
-
-            # Create wrapper that uses bundled gems
-            makeWrapper ${gems.wrappedRuby}/bin/ruby $out/bin/deadfinder \
-              --add-flags "-I$out/lib ${self}/bin/deadfinder"
-
+            mkdir -p $out/bin
+            cp bin/deadfinder $out/bin/deadfinder
             runHook postInstall
           '';
 
+          doCheck = false;
+
           meta = with pkgs.lib; {
-            description = "Find dead-links (broken links) in web pages";
-            longDescription = ''
-              Dead link (broken link) means a link within a web page that cannot be connected.
-              These links can have a negative impact to SEO and Security.
-              This tool makes it easy to identify and modify.
-            '';
+            description = "Find dead (broken) links in web pages, URL lists, and sitemaps";
             homepage = "https://github.com/hahwul/deadfinder";
             license = licenses.mit;
-            maintainers = [ ];
+            maintainers = [ "hahwul" ];
             mainProgram = "deadfinder";
-            platforms = platforms.unix;
           };
         };
       in
       {
-        packages = {
-          default = deadfinder;
-        };
+        packages.default = deadfinder;
+        packages.deadfinder = deadfinder;
 
-        # Development shell with all dependencies
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            ruby
-            bundler
-            bundix
-            zlib
-            libyaml
-            libffi
-            pkg-config
-            libxml2
-            libxslt
-            curl
-          ];
-
+          inputsFrom = [ deadfinder ];
+          nativeBuildInputs = with pkgs; [ crystal shards crystal2nix cmake pkg-config just ];
           shellHook = ''
-            export GEM_HOME=$PWD/.gem
-            export GEM_PATH=$GEM_HOME
-            export PATH=$GEM_HOME/bin:$PATH
-
-            echo "🔍 DeadFinder development shell"
-            echo ""
-            echo "Quick start:"
-            echo "  bundle install       - Install dependencies"
-            echo "  bundle exec rspec    - Run tests"
-            echo "  bundle exec rubocop  - Run linter"
-            echo ""
-            echo "To regenerate gemset.nix after updating dependencies:"
-            echo "  bundix -l"
+            echo "deadfinder development environment (Nix)"
+            [ -d lib ] || shards install
           '';
         };
-
-        apps.default = {
-          type = "app";
-          program = "${deadfinder}/bin/deadfinder";
-        };
-      }
-    );
+      });
 }

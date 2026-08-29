@@ -1,0 +1,36 @@
++++
+title = "Docker"
+description = "ghcr.io/hahwul/deadfinder — multi-arch, tiny Alpine base."
+weight = 2
++++
+
+Image: [`ghcr.io/hahwul/deadfinder`](https://github.com/hahwul/deadfinder/pkgs/container/deadfinder)
+
+- Multi-arch: `linux/amd64`, `linux/arm64`
+- Runtime base: Alpine + static binary (~15 MB total)
+- Tags on release: `<VERSION>`, `<MAJOR>.<MINOR>`, `latest`
+
+## Run
+
+The image's `CMD` is `["deadfinder"]`. Append arguments after the image name — `docker run` passes them through:
+
+```bash
+docker run ghcr.io/hahwul/deadfinder:latest deadfinder url https://www.example.com
+docker run ghcr.io/hahwul/deadfinder:latest deadfinder sitemap https://www.example.com/sitemap.xml
+```
+
+Writing results out? Bind-mount a host directory:
+
+```bash
+docker run --rm -v "$PWD":/out \
+  ghcr.io/hahwul/deadfinder:latest \
+  deadfinder url https://www.example.com -o /out/results.json -s
+```
+
+## Pin a version
+
+```bash
+docker pull ghcr.io/hahwul/deadfinder:2.0.0
+docker pull ghcr.io/hahwul/deadfinder:2.0
+docker pull ghcr.io/hahwul/deadfinder:latest
+```

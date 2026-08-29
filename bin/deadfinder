@@ -1,4 +1,0 @@
-#!/usr/bin/env ruby
-
-require 'deadfinder'
-DeadFinder::CLI.start(ARGV)

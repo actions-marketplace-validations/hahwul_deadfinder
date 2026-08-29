@@ -1,0 +1,187 @@
+require "option_parser"
+
+module Deadfinder
+  module CLI
+    def self.run(args = ARGV)
+      options = Options.new
+
+      subcommand : String? = nil
+      positional_arg : String? = nil
+      extra_args = [] of String
+
+      global_parser = OptionParser.new do |parser|
+        parser.banner = "Usage: deadfinder <command> [options]"
+        parser.separator ""
+        parser.separator "Commands:"
+        parser.separator "  pipe                        Scan the URLs from STDIN"
+        parser.separator "  file <FILE>                 Scan the URLs from File (`-` for STDIN)"
+        parser.separator "  url <URL>                   Scan the Single URL"
+        parser.separator "  sitemap <SITEMAP-URL>       Scan the URLs from sitemap"
+        parser.separator "  completion <SHELL>           Generate completion script (bash/zsh/fish)"
+        parser.separator "  version                     Show version"
+        parser.separator ""
+        parser.separator "Options:"
+
+        parser.on("-r", "--include30x", "Include 30x redirections") { options.include30x = true }
+        parser.on("-c CONCURRENCY", "--concurrency=CONCURRENCY", "Number of concurrency (default: 50)") { |v| options.concurrency = v.to_i }
+        parser.on("-t TIMEOUT", "--timeout=TIMEOUT", "Timeout in seconds (default: 10)") { |v| options.timeout = v.to_i }
+        parser.on("-o OUTPUT", "--output=OUTPUT", "File to write result") { |v| options.output = v }
+        parser.on("-f FORMAT", "--output_format=FORMAT", "Output format: json, yaml, toml, csv, sarif (default: json)") { |v| options.output_format = v }
+        parser.on("-H HEADER", "--headers=HEADER", "Custom HTTP headers for initial request") { |v| options.headers << v }
+        parser.on("--worker_headers=HEADER", "Custom HTTP headers for worker requests") { |v| options.worker_headers << v }
+        parser.on("--user_agent=UA", "User-Agent string") { |v| options.user_agent = v }
+        parser.on("-p PROXY", "--proxy=PROXY", "Proxy server") { |v| options.proxy = v }
+        parser.on("--proxy_auth=CREDS", "Proxy authentication (user:pass)") { |v| options.proxy_auth = v }
+        parser.on("-k", "--insecure", "Skip TLS certificate verification (not recommended)") { options.insecure = true }
+        parser.on("-m PATTERN", "--match=PATTERN", "Match URL pattern") { |v| options.match = v }
+        parser.on("-i PATTERN", "--ignore=PATTERN", "Ignore URL pattern") { |v| options.ignore = v }
+        parser.on("-s", "--silent", "Silent mode") { options.silent = true }
+        parser.on("-v", "--verbose", "Verbose mode") { options.verbose = true }
+        parser.on("--debug", "Debug mode") { options.debug = true }
+        parser.on("--limit=N", "Limit number of URLs to scan") { |v| options.limit = v.to_i }
+        parser.on("--coverage", "Enable coverage tracking and reporting") { options.coverage = true }
+        parser.on("--visualize=PATH", "Generate visualization PNG") { |v| options.visualize = v }
+        parser.on("-h", "--help", "Show help") do
+          puts parser
+          exit
+        end
+
+        parser.unknown_args do |remaining, _|
+          if remaining.size > 0
+            subcommand = remaining[0]
+            positional_arg = remaining[1]? if remaining.size > 1
+            extra_args = remaining[2..] if remaining.size > 2
+          end
+        end
+      end
+
+      begin
+        global_parser.parse(args)
+      rescue ex : OptionParser::Exception | ArgumentError
+        STDERR.puts "Error: #{ex.message}"
+        exit 1
+      end
+
+      # Reject arguments the chosen subcommand cannot use instead of silently
+      # dropping them: `deadfinder file a.txt b.txt` used to scan only a.txt,
+      # and `deadfinder pipe urls.txt` used to ignore the file entirely and then
+      # block on an empty STDIN.
+      leftover = extra_args.dup
+      if (arg = positional_arg) && subcommand && ["pipe", "version"].includes?(subcommand)
+        leftover.unshift(arg)
+      end
+      unless leftover.empty?
+        STDERR.puts "Error: unexpected argument#{leftover.size > 1 ? "s" : ""} for `#{subcommand}`: #{leftover.join(" ")}"
+        exit 1
+      end
+
+      # Validate numeric and enum options up front so invalid values fail fast
+      # with a clear message rather than hanging or silently misbehaving. Only
+      # the scanning subcommands consume these, so `version`/`completion` aren't
+      # rejected for an (irrelevant) bad option value.
+      if subcommand && ["pipe", "file", "url", "sitemap"].includes?(subcommand)
+        if options.concurrency < 1
+          STDERR.puts "Error: concurrency must be >= 1 (got #{options.concurrency})"
+          exit 1
+        end
+        if options.timeout < 1
+          STDERR.puts "Error: timeout must be >= 1 (got #{options.timeout})"
+          exit 1
+        end
+        if options.limit < 0
+          STDERR.puts "Error: limit must be >= 0 (got #{options.limit})"
+          exit 1
+        end
+        allowed_formats = ["json", "yaml", "yml", "csv", "toml", "sarif"]
+        unless allowed_formats.includes?(options.output_format.downcase)
+          STDERR.puts "Error: unsupported output format: #{options.output_format} (allowed: #{allowed_formats.join(", ")})"
+          exit 1
+        end
+      end
+
+      # Auto-enable coverage if visualize is set
+      if !options.visualize.empty?
+        options.coverage = true
+      end
+
+      case subcommand
+      when "pipe"
+        Deadfinder.run_pipe(options)
+      when "file"
+        if positional_arg
+          filename = positional_arg.not_nil!
+          # `File.file?` is true only for regular files, which rejected every
+          # legitimate non-regular source: shell process substitution
+          # (`deadfinder file <(...)` -> /dev/fd/N), /dev/stdin, and named
+          # pipes all reported a bogus "file not found". Check existence
+          # instead, and name a directory for what it is.
+          if filename != Deadfinder::STDIN_FILENAME
+            if Dir.exists?(filename)
+              STDERR.puts "Error: #{filename} is a directory, not a file"
+              exit 1
+            end
+            unless File.exists?(filename)
+              STDERR.puts "Error: file not found: #{filename}"
+              exit 1
+            end
+          end
+          Deadfinder.run_file(filename, options)
+        else
+          STDERR.puts "Error: file command requires a filename argument"
+          STDERR.puts "Usage: deadfinder file <FILE> [options]  (use `-` to read from STDIN)"
+          exit 1
+        end
+      when "url"
+        if positional_arg
+          target = positional_arg.not_nil!
+          if reason = Deadfinder.http_target_error(target)
+            STDERR.puts "Error: #{reason}"
+            exit 1
+          end
+          Deadfinder.run_url(target, options)
+        else
+          STDERR.puts "Error: url command requires a URL argument"
+          STDERR.puts "Usage: deadfinder url <URL> [options]"
+          exit 1
+        end
+      when "sitemap"
+        if positional_arg
+          target = positional_arg.not_nil!
+          if reason = Deadfinder.http_target_error(target)
+            STDERR.puts "Error: #{reason}"
+            exit 1
+          end
+          Deadfinder.run_sitemap(target, options)
+        else
+          STDERR.puts "Error: sitemap command requires a URL argument"
+          STDERR.puts "Usage: deadfinder sitemap <SITEMAP-URL> [options]"
+          exit 1
+        end
+      when "completion"
+        if positional_arg
+          shell = positional_arg.not_nil!
+          unless ["bash", "zsh", "fish"].includes?(shell)
+            Deadfinder::Logger.error "Unsupported shell: #{shell}"
+            exit 1
+          end
+          case shell
+          when "bash"
+            puts Deadfinder::Completion.bash
+          when "zsh"
+            puts Deadfinder::Completion.zsh
+          when "fish"
+            puts Deadfinder::Completion.fish
+          end
+        else
+          STDERR.puts "Error: completion command requires a shell argument (bash/zsh/fish)"
+          exit 1
+        end
+      when "version"
+        Deadfinder::Logger.info "deadfinder #{Deadfinder::VERSION}"
+      else
+        puts global_parser
+        exit 1 if subcommand
+      end
+    end
+  end
+end

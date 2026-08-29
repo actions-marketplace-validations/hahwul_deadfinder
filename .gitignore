@@ -1,20 +1,21 @@
-/.bundle/
-/.yardoc
-/_yardoc/
-/coverage/
-/doc/
-/pkg/
-/spec/reports/
-/tmp/
-/vendor/
-deadfinder*.gem
-bom.xml
+/lib/
+/.shards/
+*.dwarf
+
+# Built binary
+/deadfinder
+
+# Release artifacts
+/deadfinder-*.tar.gz
+/deadfinder-*.tar.gz.sha256
 
 # Nix
-/.gem/
-result
-result-*
+/result
+/result-*
 .direnv/
 
-# Zola
+# macOS
+.DS_Store
+
+# Hwaro docs site
 docs/public/*
