@@ -92,13 +92,6 @@ describe Deadfinder::HttpClient do
     end
   end
 
-  describe ".absolute_uri" do
-    it "returns the full URI string" do
-      uri = URI.parse("http://example.com/path?q=1")
-      Deadfinder::HttpClient.absolute_uri(uri).should eq("http://example.com/path?q=1")
-    end
-  end
-
   describe ".request_path" do
     it "defaults an empty path to /" do
       Deadfinder::HttpClient.request_path(URI.parse("http://example.com"), default_test_options).should eq("/")
@@ -120,6 +113,11 @@ describe Deadfinder::HttpClient do
       options = default_test_options
       options.proxy = "http://127.0.0.1:8080"
       Deadfinder::HttpClient.request_path(URI.parse("https://example.com/a"), options).should eq("/a")
+    end
+
+    it "percent-encodes raw non-ASCII and spaces, leaving existing escapes alone" do
+      Deadfinder::HttpClient.request_path(URI.parse("http://example.com/한글/a b%20c?q=가&r=%E3%81%82"), default_test_options)
+        .should eq("/%ED%95%9C%EA%B8%80/a%20b%20c?q=%EA%B0%80&r=%E3%81%82")
     end
   end
 

@@ -440,7 +440,40 @@ describe Deadfinder::Runner do
     end
   end
 
-  describe "#worker" do
+  describe ".each_concurrently" do
+    it "handles every item, including falsy ones, with more workers than items" do
+      got = [] of Bool
+      Deadfinder.each_concurrently([true, false, true, false], 10) { |b| got << b }
+      got.sort_by(&.hash).should eq [true, false, true, false].sort_by(&.hash)
+    end
+
+    it "returns at once for an empty list" do
+      called = false
+      Deadfinder.each_concurrently([] of String, 4) { called = true }
+      called.should be_false
+    end
+
+    it "walks a Hash as key/value pairs" do
+      seen = [] of String
+      Deadfinder.each_concurrently({"a" => 1, "b" => 2}, 2) { |(k, v)| seen << "#{k}#{v}" }
+      seen.sort.should eq ["a1", "b2"]
+    end
+
+    it "still returns when the block raises" do
+      done = Channel(Nil).new
+      spawn do
+        Deadfinder.each_concurrently([1, 2, 3], 3) { |i| raise "boom" if i == 2 }
+        done.send(nil)
+      end
+      select
+      when done.receive
+      when timeout(2.seconds)
+        fail "each_concurrently hung after a raising block"
+      end
+    end
+  end
+
+  describe "#check_request" do
     it "detects 404 as broken link" do
       target = "http://example.com"
       url = "http://example.com/broken"
@@ -451,12 +484,7 @@ describe Deadfinder::Runner do
       options = default_test_options
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       args[:output][target].should contain url
     end
@@ -471,12 +499,7 @@ describe Deadfinder::Runner do
       options = default_test_options
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       args[:output][target].should contain url
     end
@@ -491,12 +514,7 @@ describe Deadfinder::Runner do
       options = default_test_options
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       (args[:output][target]? || [] of String).should_not contain url
     end
@@ -512,12 +530,7 @@ describe Deadfinder::Runner do
       options.include30x = false
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       (args[:output][target]? || [] of String).should_not contain url
     end
@@ -533,12 +546,7 @@ describe Deadfinder::Runner do
       options.include30x = true
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       args[:output][target].should contain url
     end
@@ -554,12 +562,7 @@ describe Deadfinder::Runner do
       # Pre-populate the status cache as if a previous page already checked it.
       args[:status_cache][url] = 404
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       # The cached dead status is attributed to this target without a 2nd request.
       args[:output][target].should contain url
@@ -576,14 +579,9 @@ describe Deadfinder::Runner do
       options = default_test_options
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for("http://example.com/a"))
-      jobs.send(job_for("http://example.com/b"))
-      jobs.send(job_for("http://example.com/c"))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      ["http://example.com/a", "http://example.com/b", "http://example.com/c"].each do |url|
+        runner.check_request(*job_for(url), target, options, **args)
+      end
 
       dead = args[:output][target]
       dead.should contain "http://example.com/a"
@@ -603,14 +601,9 @@ describe Deadfinder::Runner do
       options.coverage = true
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for("http://example.com/ok"))
-      jobs.send(job_for("http://example.com/not-found"))
-      jobs.send(job_for("http://example.com/server-err"))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      ["http://example.com/ok", "http://example.com/not-found", "http://example.com/server-err"].each do |url|
+        runner.check_request(*job_for(url), target, options, **args)
+      end
 
       cov = args[:coverage_data][target]
       cov.total.should eq 3
@@ -633,12 +626,7 @@ describe Deadfinder::Runner do
       options.worker_headers = ["Authorization: Bearer token123"]
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       # Should not be in dead links (200 response with correct headers)
       (args[:output][target]? || [] of String).should_not contain url
@@ -656,12 +644,7 @@ describe Deadfinder::Runner do
       options.worker_headers = ["User-Agent: my-custom-agent"]
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       # 200 only matches when the custom UA is sent; if the default UA overrode
       # it, WebMock would not match, the request would raise, and url would be
@@ -679,12 +662,7 @@ describe Deadfinder::Runner do
       options = default_test_options
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       # Should be flagged as broken and present in the output
       args[:output][target].should contain url
@@ -701,12 +679,7 @@ describe Deadfinder::Runner do
       options.coverage = true
       args = make_runner_args
 
-      jobs = Channel(Tuple(String, Array(String))).new(10)
-      results = Channel(Nil).new(10)
-      jobs.send(job_for(url))
-      jobs.close
-
-      runner.worker(1, jobs, results, target, options, **args)
+      runner.check_request(*job_for(url), target, options, **args)
 
       cov = args[:coverage_data][target]
       cov.total.should eq 1
@@ -828,6 +801,403 @@ describe Deadfinder::Runner do
         "http://frag.test/guide#usage",
       ]
       args[:coverage_data]["http://frag.test/index.html"].total.should eq 2
+    end
+  end
+
+  describe "#run cross-target request de-duplication" do
+    it "requests a URL shared by two concurrently scanned targets only once" do
+      link = %(<a href="http://shared.test/x">s</a>)
+      WebMock.stub(:get, "http://a.test").to_return(body: "<html><body>#{link}</body></html>")
+      WebMock.stub(:get, "http://b.test").to_return(body: "<html><body>#{link}</body></html>")
+      # Sleeping inside the stub yields the fiber mid-request, which is exactly
+      # the window in which the second target used to issue a duplicate request:
+      # both miss the status cache, because neither has written it yet.
+      shared = WebMock.stub(:get, "http://shared.test/x").to_return do
+        sleep 20.milliseconds
+        HTTP::Client::Response.new(404, body: "")
+      end
+
+      options = default_test_options
+      args = make_runner_args
+      runner = Deadfinder::Runner.new
+
+      done = Channel(Nil).new
+      ["http://a.test", "http://b.test"].each do |target|
+        spawn do
+          runner.run(target, options, **args)
+          done.send(nil)
+        end
+      end
+      2.times { done.receive }
+
+      shared.calls.should eq 1
+      # The second requester still gets the status attributed to its own target
+      # rather than silently dropping the link.
+      args[:output]["http://a.test"].should contain "http://shared.test/x"
+      args[:output]["http://b.test"].should contain "http://shared.test/x"
+      args[:status_cache]["http://shared.test/x"].should eq 404
+    end
+
+    it "lets a waiter fall through to its own request when the fetch failed" do
+      link = %(<a href="http://unreachable.test/x">s</a>)
+      WebMock.stub(:get, "http://c.test").to_return(body: "<html><body>#{link}</body></html>")
+      WebMock.stub(:get, "http://d.test").to_return(body: "<html><body>#{link}</body></html>")
+      # No stub for unreachable.test: every fetch raises, so the owner records
+      # ERROR_STATUS. The in-flight entry must still be cleared, otherwise the
+      # waiter would block on a channel nobody ever closes.
+      options = default_test_options
+      args = make_runner_args
+      runner = Deadfinder::Runner.new
+
+      done = Channel(Nil).new
+      ["http://c.test", "http://d.test"].each do |target|
+        spawn do
+          runner.run(target, options, **args)
+          done.send(nil)
+        end
+      end
+      2.times { done.receive }
+
+      args[:status_cache]["http://unreachable.test/x"].should eq Deadfinder::Runner::ERROR_STATUS
+      args[:output]["http://c.test"].should contain "http://unreachable.test/x"
+      args[:output]["http://d.test"].should contain "http://unreachable.test/x"
+    end
+  end
+end
+
+describe Deadfinder::RequestPermits do
+  it "never lets more than `size` blocks run at once" do
+    permits = Deadfinder::RequestPermits.new(3)
+    inflight = 0
+    peak = 0
+    done = Channel(Nil).new
+
+    10.times do
+      spawn do
+        permits.acquire do
+          inflight += 1
+          peak = inflight if inflight > peak
+          sleep 2.milliseconds
+          inflight -= 1
+        end
+        done.send(nil)
+      end
+    end
+    10.times { done.receive }
+
+    peak.should eq 3
+    inflight.should eq 0
+  end
+
+  it "clamps a non-positive size to one" do
+    Deadfinder::RequestPermits.new(0).size.should eq 1
+    Deadfinder::RequestPermits.new(-5).size.should eq 1
+  end
+
+  it "returns the permit when the block raises" do
+    permits = Deadfinder::RequestPermits.new(1)
+    expect_raises(Exception, "boom") { permits.acquire { raise "boom" } }
+    # The slot has to be free again; otherwise the next acquire hangs forever.
+    permits.acquire { 42 }.should eq 42
+  end
+
+  it "reuses one pool per size so every target draws from the same budget" do
+    pool = Deadfinder::Runner.permits(7)
+    pool.size.should eq 7
+    Deadfinder::Runner.permits(7).should be pool
+    Deadfinder::Runner.permits(9).should_not be pool
+  end
+end
+
+describe Deadfinder::Runner do
+  before_each { WebMock.reset }
+
+  describe "#run media and image extraction" do
+    it "extracts img/source/video/audio/track/area resources" do
+      target = "http://media.test/"
+      html = <<-HTML
+        <html><body>
+          <img src="/i.png">
+          <picture><source srcset="/p.webp"></picture>
+          <video src="/v.mp4" poster="/poster.jpg">
+            <source src="/v.webm">
+            <track src="/subs.vtt">
+          </video>
+          <audio src="/a.mp3"></audio>
+          <map><area href="/region"></map>
+        </body></html>
+      HTML
+
+      WebMock.stub(:get, target).to_return(body: html)
+      %w[/i.png /p.webp /v.mp4 /poster.jpg /v.webm /subs.vtt /a.mp3 /region].each do |path|
+        WebMock.stub(:get, "http://media.test#{path}").to_return(status: 404)
+      end
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      dead = args[:output][target]
+      dead.should contain "http://media.test/i.png"
+      dead.should contain "http://media.test/p.webp"
+      dead.should contain "http://media.test/v.mp4"
+      dead.should contain "http://media.test/poster.jpg"
+      dead.should contain "http://media.test/v.webm"
+      dead.should contain "http://media.test/subs.vtt"
+      dead.should contain "http://media.test/a.mp3"
+      dead.should contain "http://media.test/region"
+      dead.size.should eq 8
+    end
+
+    it "still extracts the seven original element types" do
+      target = "http://legacy.test/"
+      html = <<-HTML
+        <html><head>
+          <script src="/s.js"></script>
+          <link href="/s.css">
+        </head><body>
+          <a href="/page">a</a>
+          <iframe src="/frame"></iframe>
+          <form action="/submit"></form>
+          <object data="/o.swf"></object>
+          <embed src="/e.swf">
+        </body></html>
+      HTML
+
+      WebMock.stub(:get, target).to_return(body: html)
+      %w[/s.js /s.css /page /frame /submit /o.swf /e.swf].each do |path|
+        WebMock.stub(:get, "http://legacy.test#{path}").to_return(status: 404)
+      end
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      args[:output][target].size.should eq 7
+    end
+  end
+
+  describe "#run srcset parsing" do
+    it "extracts each candidate URL and drops the descriptors" do
+      target = "http://srcset.test/"
+      html = %(<html><body><img srcset="/img-480.png 480w, /img-2x.png 2x"></body></html>)
+
+      WebMock.stub(:get, target).to_return(body: html)
+      WebMock.stub(:get, "http://srcset.test/img-480.png").to_return(status: 404)
+      WebMock.stub(:get, "http://srcset.test/img-2x.png").to_return(status: 404)
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      args[:output][target].sort.should eq [
+        "http://srcset.test/img-2x.png",
+        "http://srcset.test/img-480.png",
+      ]
+    end
+
+    it "keeps commas that belong to the URL instead of splitting on them" do
+      target = "http://comma.test/"
+      html = %(<html><body><img srcset="/a,b.png 1x, /c.png 2x"></body></html>)
+
+      WebMock.stub(:get, target).to_return(body: html)
+      WebMock.stub(:get, "http://comma.test/a,b.png").to_return(status: 404)
+      WebMock.stub(:get, "http://comma.test/c.png").to_return(status: 404)
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      args[:output][target].sort.should eq [
+        "http://comma.test/a,b.png",
+        "http://comma.test/c.png",
+      ]
+    end
+
+    it "splits candidates that carry no descriptor at all" do
+      target = "http://nodesc.test/"
+      html = %(<html><body><source srcset="  /a.png ,   /b.png  "></body></html>)
+
+      WebMock.stub(:get, target).to_return(body: html)
+      WebMock.stub(:get, "http://nodesc.test/a.png").to_return(status: 404)
+      WebMock.stub(:get, "http://nodesc.test/b.png").to_return(status: 404)
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      args[:output][target].sort.should eq [
+        "http://nodesc.test/a.png",
+        "http://nodesc.test/b.png",
+      ]
+    end
+
+    it "ignores an empty or whitespace-only srcset" do
+      target = "http://empty.test/"
+      html = %(<html><body><img srcset="   ,  , "><img src="/real.png"></body></html>)
+
+      WebMock.stub(:get, target).to_return(body: html)
+      WebMock.stub(:get, "http://empty.test/real.png").to_return(status: 404)
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run(target, default_test_options, **args)
+
+      args[:output][target].should eq ["http://empty.test/real.png"]
+    end
+  end
+
+  describe "#run anchor checking" do
+    doc = %(<html><body><h1 id="install">i</h1><a name="legacy"></a><div id="\u{d55c}\u{ae00}"></div></body></html>)
+
+    it "does not check fragments unless --check-anchors is given" do
+      WebMock.stub(:get, "http://anchor.test/")
+        .to_return(body: %(<html><body><a href="/guide#nope">n</a></body></html>))
+      WebMock.stub(:get, "http://anchor.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://anchor.test/", default_test_options, **args)
+
+      (args[:output]["http://anchor.test/"]? || [] of String).should be_empty
+    end
+
+    it "reports a fragment with no matching id as dead" do
+      WebMock.stub(:get, "http://anchor.test/")
+        .to_return(body: %(<html><body><a href="/guide#nope">n</a></body></html>))
+      WebMock.stub(:get, "http://anchor.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://anchor.test/", options, **args)
+
+      args[:output]["http://anchor.test/"].should eq ["http://anchor.test/guide#nope"]
+    end
+
+    it "accepts a fragment matching an id, a legacy <a name>, or a percent-encoded id" do
+      html = %(<html><body>
+        <a href="/guide#install">a</a>
+        <a href="/guide#legacy">b</a>
+        <a href="/guide#%ED%95%9C%EA%B8%80">c</a>
+      </body></html>)
+      WebMock.stub(:get, "http://ok-anchor.test/").to_return(body: html)
+      WebMock.stub(:get, "http://ok-anchor.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://ok-anchor.test/", options, **args)
+
+      (args[:output]["http://ok-anchor.test/"]? || [] of String).should be_empty
+    end
+
+    it "treats #top and an empty fragment as valid by definition" do
+      html = %(<html><body>
+        <a href="/guide#top">t</a>
+        <a href="/guide#TOP">T</a>
+        <a href="/guide#">e</a>
+      </body></html>)
+      WebMock.stub(:get, "http://top.test/").to_return(body: html)
+      WebMock.stub(:get, "http://top.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://top.test/", options, **args)
+
+      (args[:output]["http://top.test/"]? || [] of String).should be_empty
+    end
+
+    it "opens the linked document once no matter how many fragments point at it" do
+      requests = 0
+      html = %(<html><body>
+        <a href="/guide#install">a</a>
+        <a href="/guide#nope1">b</a>
+        <a href="/guide#nope2">c</a>
+      </body></html>)
+      WebMock.stub(:get, "http://once.test/").to_return(body: html)
+      WebMock.stub(:get, "http://once.test/guide").to_return do
+        requests += 1
+        HTTP::Client::Response.new(200, body: doc, headers: HTTP::Headers{"Content-Type" => "text/html"})
+      end
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://once.test/", options, **args)
+
+      # One status check for the link pass plus one body read for the anchor
+      # pass — not one per fragment.
+      requests.should eq 2
+      args[:output]["http://once.test/"].sort.should eq [
+        "http://once.test/guide#nope1",
+        "http://once.test/guide#nope2",
+      ]
+    end
+
+    it "leaves a fragment on a non-HTML document alone" do
+      WebMock.stub(:get, "http://pdf.test/")
+        .to_return(body: %(<html><body><a href="/manual.pdf#page=3">p</a></body></html>))
+      WebMock.stub(:get, "http://pdf.test/manual.pdf")
+        .to_return(status: 200, body: "%PDF-1.4", headers: {"Content-Type" => "application/pdf"})
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://pdf.test/", options, **args)
+
+      (args[:output]["http://pdf.test/"]? || [] of String).should be_empty
+    end
+
+    it "does not re-report a fragment whose document already failed the HTTP check" do
+      WebMock.stub(:get, "http://gone.test/")
+        .to_return(body: %(<html><body><a href="/guide#nope">n</a></body></html>))
+      WebMock.stub(:get, "http://gone.test/guide").to_return(status: 404)
+
+      options = default_test_options
+      options.check_anchors = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://gone.test/", options, **args)
+
+      # Reported exactly once, as the HTTP failure it is.
+      args[:output]["http://gone.test/"].should eq ["http://gone.test/guide#nope"]
+    end
+
+    it "counts a missing anchor as dead in coverage" do
+      html = %(<html><body>
+        <a href="/guide#install">a</a>
+        <a href="/guide#nope">b</a>
+      </body></html>)
+      WebMock.stub(:get, "http://cov.test/").to_return(body: html)
+      WebMock.stub(:get, "http://cov.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      options = default_test_options
+      options.check_anchors = true
+      options.coverage = true
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://cov.test/", options, **args)
+
+      cov = args[:coverage_data]["http://cov.test/"]
+      cov.total.should eq 2
+      cov.dead.should eq 1
+      # The HTTP histogram still reports what the server actually answered.
+      cov.status_counts["200"].should eq 2
+    end
+
+    it "does not count a link twice when its 2xx is listed in --dead-status" do
+      html = %(<html><body><a href="/guide#nope">n</a></body></html>)
+      WebMock.stub(:get, "http://soft404.test/").to_return(body: html)
+      WebMock.stub(:get, "http://soft404.test/guide")
+        .to_return(status: 200, body: doc, headers: {"Content-Type" => "text/html"})
+
+      options = default_test_options
+      options.check_anchors = true
+      options.coverage = true
+      options.dead_status = "200"
+      args = make_runner_args
+      Deadfinder::Runner.new.run("http://soft404.test/", options, **args)
+
+      args[:output]["http://soft404.test/"].should eq ["http://soft404.test/guide#nope"]
+      args[:coverage_data]["http://soft404.test/"].dead.should eq 1
     end
   end
 end

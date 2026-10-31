@@ -5,6 +5,26 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 ## [Unreleased]
 
 ### Added
+- Windows x86_64 builds: releases ship `deadfinder-windows-x86_64.zip` (a static `deadfinder.exe`, no Visual C++ redistributable needed), and a `windows.yml` CI job builds and smoke-tests it.
+- Chocolatey package: `choco install deadfinder`, published after each release by `publish-chocolatey.yml`.
+
+## [2.1.0]
+
+### Added
+- `-F` / `--fail-on-dead` exits `2` when a scan finds a dead link or a dead target, so a CI job can finally gate on a broken link. Opt-in: a scan has always exited `0` and `spec/compat/run.rb` locks that, so the default is unchanged. `1` stays reserved for usage and I/O errors. The GitHub Action gained a matching `fail_on_dead` input; it holds the scan's status until the report has been published as a step output, then re-raises it.
+- `-o -` streams the report to STDOUT instead of creating a file literally named `-`, and moves the live log to STDERR in that mode so `deadfinder url X -f json -o - | jq` works without `--silent`.
+- A scan target that is itself broken (4xx/5xx, or unreachable) is now reported under a new top-level `dead_targets` key, emitted only when non-empty. Previously only links *found on* a page could be reported, so `deadfinder file urls.txt` on a list whose entries all 404 printed `{}` and exited 0 — including the `deadfinder file <(subfinder | httpx)` workflow the README advertises. Dead targets also count toward `--coverage` and SARIF (as a distinct `DEAD_TARGET` rule).
+- `<img src>`/`<img srcset>`, `<source src>`/`<source srcset>`, `<video src>`/`<video poster>`, `<audio src>`, `<track src>` and `<area href>` are extracted and checked. Broken images are among the most common dead links and were entirely invisible before: a page with ten resources had six of them checked. `srcset` is parsed per the HTML candidate grammar, so a URL containing a comma is not split apart.
+- `--check-anchors` verifies that a link's `#fragment` actually exists in the linked document (`id`, or a legacy `<a name>`). `/page#does-not-exist` used to report a cheerful `200`. Opt-in, since it needs the response body; one fetch still serves every fragment pointing at the same document.
+- `--target-concurrency=N` (default 10) scans several targets at once. `-c` only ever parallelized the links *within* one page, so pages were fetched strictly one after another — 20 targets behind 300 ms of latency took 6.4 s where they now take 0.9 s, and a 5000-URL sitemap paid 5000 serial round trips before any concurrency helped. `-c` becomes a *global* cap on in-flight requests rather than a per-page one, so target concurrency rides on a fixed budget instead of multiplying it into 500 sockets aimed at one host. Each target's log lines are buffered and flushed as one block so concurrent scans do not shred each other's output; with `--target-concurrency 1` the output is byte-identical to before.
+- `--method=auto|head|get` (default `auto`) checks a link with HEAD and confirms with GET whenever the HEAD *status* cannot be trusted (405/501, any 4xx/5xx), so no link is ever reported dead on a HEAD status alone. A HEAD that never reached the host (connect refused/timed out, DNS failure) is not re-checked — a GET cannot succeed where the TCP connect did not, and doing so cost a second full connect timeout on every unreachable link. A status check used to download the entire body: 20 one-megabyte links cost 20 MB to learn 20 status codes, and now cost none. Documents (the target page, a sitemap) are still fetched with GET.
+- Keep-alive connections are pooled per origin with borrow/return semantics, replacing a fresh `HTTP::Client` — and on HTTPS a fresh TLS handshake — for every single link check. The proxy paths are deliberately left unpooled.
+- `--retry=N` (default 2) retries a *transient* failure (connection error, timeout, 429, 5xx) with jittered exponential backoff, honoring `Retry-After` in both its delta-seconds and HTTP-date forms and bounded by `--timeout`. A 404 is never retried. Only the final verdict is cached: the URL→status cache is process-global and never expires, so a single TCP reset used to mark a URL dead for every remaining page in the run.
+- `--delay=MS` enforces a minimum interval between two requests to the same host, per-host so one slow host does not stall the others. A `Retry-After` earned by one worker holds back every other worker queued on that host.
+- `--accept-status=LIST` and `--dead-status=LIST` (alias `--exclude-status`) override the dead/alive policy with bare codes and inclusive ranges (`200,204,403,999`, `400-499`). The rule was hardcoded at `>= 400`, which left no escape hatch for the well-known bot-defense answers — LinkedIn's `999`, Cloudflare's `403` to a non-browser User-Agent, a rate limiter's `429` — every one of them a false positive.
+- Coverage output gained correctly named `dead_link_percentage` / `overall_dead_link_percentage` fields. `coverage_percentage` was always `dead / total * 100`, i.e. the dead-link ratio, so a perfectly healthy site reported "0% coverage". The old keys remain as deprecated aliases.
+- Shell completions now complete subcommands, `bash|zsh|fish` after `completion`, and the output formats after `--output_format`, alongside the short flag spellings. A spec scrapes `cli.cr`'s parser and fails when any surface drifts out of step with it.
+- `-k` / `--insecure`, `--limit` and `-f` / `--output_format` reached the surfaces that had never mentioned them: the README flag list, all three completion generators, `docs/`, and the Action's inputs.
 - Sitemap fetching transparently inflates gzip-compressed documents, so a `sitemap.xml.gz` served as `application/gzip` (no `Content-Encoding`) is parsed instead of failing with an XML error.
 - `-H`/`--headers` now applies to the sitemap request too, so a sitemap behind auth or a custom edge header can be fetched.
 
@@ -13,6 +33,8 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - Multi-target scans (`pipe`/`file`/`sitemap`) now attribute a shared broken link to **every** page that references it, not just the first page scanned, and per-target coverage counts each page's own links. Internally the global "already-seen" URL set became a URL→status cache, so each link is still fetched at most once. Previously a 404 referenced by pages A and B was reported only under A and skewed B's coverage.
 
 ### Fixed
+- Multi-arch Docker images on GHCR pull again. A per-publish cleanup deleted every untagged package version, including the per-platform manifests that the `main`, `latest` and version tags point at, so `docker pull` failed with `manifests/sha256:… not found`. The cleanup now runs monthly and keeps manifests a tagged image still references (#277).
+- macOS release tarballs are re-signed ad hoc after `install_name_tool` rewrites their dylib load paths. The bundled OpenSSL dylibs were left with a stale signature, and Apple Silicon SIGKILLs any process that maps one, so the tarball died at launch with a bare `killed` and no diagnostic. Packaging now verifies every signature and runs the extracted tarball before publishing it. The published 2.0.2 tarball happened to bundle no dylibs and so was unaffected (#271).
 - macOS release tarballs now bundle Homebrew-linked runtime libraries (OpenSSL, libyaml, pcre2, bdw-gc) next to the binary so direct-download installs work without a local Homebrew dependency tree.
 - `url`/`sitemap` no longer silently report nothing when the target redirects. Previously the `30x` body was parsed as the page (zero links discovered, no message) and a redirected sitemap failed outright with `HTTP 301`.
 - Relative links are resolved against `<base href>` when the document declares one, matching browser behaviour, instead of always resolving against the page URL.
@@ -81,7 +103,8 @@ If you need a bugfix in v1, open an issue/PR against the [`legacy/v1`](https://g
 
 History prior to 2.0.0 was not maintained in this file. See [GitHub Releases](https://github.com/hahwul/deadfinder/releases?q=prerelease%3Afalse) and the [`legacy/v1`](https://github.com/hahwul/deadfinder/tree/legacy/v1) branch for v1 release history.
 
-[Unreleased]: https://github.com/hahwul/deadfinder/compare/2.0.2...HEAD
+[Unreleased]: https://github.com/hahwul/deadfinder/compare/2.1.0...HEAD
+[2.1.0]: https://github.com/hahwul/deadfinder/releases/tag/2.1.0
 [2.0.2]: https://github.com/hahwul/deadfinder/releases/tag/2.0.2
 [2.0.1]: https://github.com/hahwul/deadfinder/releases/tag/2.0.1
 [2.0.0]: https://github.com/hahwul/deadfinder/releases/tag/2.0.0
